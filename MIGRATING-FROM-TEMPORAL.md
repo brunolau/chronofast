@@ -172,6 +172,29 @@ where migrating loses information rather than only changing syntax.
 
 ## What changed since 1.0.0, if you read an earlier version of this guide
 
+As of 1.1.0, parity moved closer to Temporal in five places:
+
+- **The component factories validate like Temporal's constructors.** `ChronoPlain.of`,
+  `ChronoDate.of`, `ChronoZoned.fromLocal`, `atTime` throw `RangeError` on impossible
+  fields (`of(2023, 2, 29)`), instead of silently balancing the way `Date` does. Note the
+  one nuance in the *Constructing* table below: `Temporal.PlainDateTime.from({...})`
+  **clamps** such fields by default (`overflow: 'constrain'` gives Feb 28); chronofast's
+  `of()` is the constructor's strictness, not `from`'s leniency. Pass balanced fields, or
+  keep `Temporal.from`'s clamping as your own explicit step.
+- **Numeric input and arithmetic fail closed.** Epoch milliseconds and arithmetic amounts
+  must be finite integers, and arithmetic throws `RangeError`/`InvalidInstantError`
+  instead of returning a value outside the type's representable range — as Temporal's
+  arithmetic does at its instant limits.
+- **Difference methods keep the full `Number` range.** `secondsUntil` over a ~68-year
+  interval used to wrap to a wrong-signed int32 value; all `*Until` methods now match
+  Temporal's totals at any range.
+- **Zero-duration zoned arithmetic is an identity.** `addDays(0)` and friends, and
+  `withZoneSameLocal` naming the current zone, return the exact stored instant — the
+  later occurrence of a DST fold no longer collapses to the earlier one. This matches
+  Temporal's zero-duration semantics.
+- **`ChronoDate` covers Temporal's complete `PlainDate` range**, `-271821-04-19` through
+  `+275760-09-13`; the first day used to throw on parse.
+
 Four statements that used to be here are no longer true:
 
 - **"chronofast returns a sentinel on bad input."** It throws now.
@@ -212,7 +235,14 @@ Four statements that used to be here are no longer true:
 | `Temporal.PlainTime.from(s)` | **no equivalent** — model time of day as minutes |
 | — | `X.tryParse(s)` — same parser, returns `null` instead of throwing |
 
-`ChronoPlain.of` and `ChronoDate.of` take **1-based months**, as Temporal does.
+`ChronoPlain.of` and `ChronoDate.of` take **1-based months**, as Temporal does — and
+they validate like Temporal's *constructors*: impossible fields throw `RangeError`, they
+are not balanced. `Temporal.PlainDateTime.from({...})` differs from its own constructor
+here — its default `overflow: 'constrain'` clamps Feb 29 to Feb 28 rather than throwing —
+so a site relying on that clamping must clamp explicitly before calling `of()`.
+
+Fractional or non-finite numeric input is rejected everywhere (`fromEpochMs(0.5)`,
+`addSeconds(0.25)` throw), matching Temporal's integer duration fields.
 
 ### Reading
 
@@ -274,6 +304,17 @@ End-of-month clamping matches Temporal's `constrain` exactly: 31 Jan + 1 month i
 `assumeZone` and `atStartOfDay` take an optional disambiguation argument
 (`'compatible'` by default, matching Temporal; `'reject'` throws `AmbiguousTimeError` on a
 DST gap or overlap).
+
+Two zone behaviors are worth knowing exactly:
+
+- **`withZoneSameLocal(z)` naming the current zone is an identity** — ids compare
+  case-insensitively — including when the value is the *later* occurrence of a DST fold.
+  The nearest Temporal construction, `zdt.toPlainDateTime().toZonedDateTime(zone)`,
+  would re-resolve that reading with `'compatible'` and collapse it to the earlier
+  occurrence. Pass a disambiguation mode explicitly to ask for that re-resolution.
+- **Sub-minute offsets serialize exactly.** chronofast prints Monrovia's 1970 offset as
+  `-00:44:30`, which round-trips; native Temporal prints it rounded to `-00:45`, which
+  does not. Strings are otherwise byte-compatible.
 
 ### Locale output
 

@@ -1,7 +1,7 @@
 {
   "name": "chronofast",
-  "version": "1.0.2",
-  "description": "Fast, immutable date and time library with real IANA time zones and no tzdb bundled. Parsing, formatting, calendar math and Intl locale output. Fully typed, zero dependencies, ~7 kB gzipped.",
+  "version": "1.1.0",
+  "description": "Fast, immutable date and time library with real IANA time zones and no tzdb bundled. Parsing, formatting, calendar math and Intl locale output. Fully typed, zero dependencies, ~8 kB gzipped.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",

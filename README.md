@@ -442,6 +442,14 @@ ChronoZoned.fromLocal('Europe/Bratislava', 2024, 10, 27, 2, 30, 0, 0, 'reject')
 // throws AmbiguousTimeError
 ```
 
+Two identities hold once you hold the *later* occurrence of a fold, and both match
+Temporal's zoned semantics: a zero date-duration is exact-time addition, and
+reinterpreting an unchanged reading in its own zone changes nothing. So `addDays(0)`,
+`addMonths(0)`, `addYears(0)` and `withZoneSameLocal` naming the current zone (compared
+case-insensitively, as IANA ids are) return the exact instant stored, not the
+`'compatible'` re-resolution of it. Pass a disambiguation mode explicitly to request
+re-resolution.
+
 ### Parsing fails closed
 
 `parse` **throws `InvalidInstantError`** — which extends `RangeError` — on anything it
@@ -583,6 +591,8 @@ read the results before the next call. It is also the smaller import — see
 | Input | `Date.parse` | chronofast |
 |---|---|---|
 | `2023-02-29T00:00:00.000Z` | silently rolls to **2023-03-01** | `NaN` |
+| `new Date(2023, 1, 29)` | rolls to Mar 1 | `ChronoPlain.of(2023, 2, 29)` throws `RangeError` |
+| `new Date(2024, 2, 15, 25)` | rolls to the next day | `ChronoPlain.of(2024, 3, 15, 25)` throws `RangeError` |
 | `2024-03-15T24:00:00.000Z` | accepts hour 24 | `NaN` |
 | `2024-03` | accepts year-month | `NaN` |
 
@@ -597,11 +607,11 @@ a bundler at all.
 
 ```
 lib/ (ESM, unminified, tree-shakeable)          raw       gzip     brotli
-  TOTAL                                     42.31 kB   13.17 kB   11.36 kB
+  TOTAL                                    119.24 kB   34.60 kB   29.68 kB
 
 browser/ (minified, single file)                raw       gzip     brotli
-  chronofast.min.js          ESM              14.59 kB    5.15 kB    4.58 kB
-  chronofast.global.min.js   window global    15.04 kB    5.35 kB    4.78 kB
+  chronofast.min.js          ESM              26.99 kB    8.22 kB    7.36 kB
+  chronofast.global.min.js   window global    27.44 kB    8.43 kB    7.55 kB
 ```
 
 `lib/` stays unminified deliberately: bundlers minify anyway, and readable output keeps
@@ -624,10 +634,10 @@ Measured with esbuild, `bundle: true, minify: true`:
 
 | your import | bundled | gzip |
 |---|--:|--:|
-| `{ ChronoInstant }` from `chronofast` | 14.20 kB | **4.98 kB** |
-| `{ ChronoInstant, ChronoZoned }` | 14.21 kB | **4.98 kB** |
-| `{ parseISO, toISO, addDays }` from `chronofast/core` | 4.29 kB | **1.76 kB** |
-| `{ parseISO }` from `chronofast/core` | 3.21 kB | **1.28 kB** |
+| `{ ChronoInstant }` from `chronofast` | 26.15 kB | **7.86 kB** |
+| `{ ChronoInstant, ChronoZoned }` | 26.16 kB | **7.86 kB** |
+| `{ parseISO, toISO, addDays }` from `chronofast/core` | 4.51 kB | **1.86 kB** |
+| `{ parseISO }` from `chronofast/core` | 3.50 kB | **1.38 kB** |
 
 Note rows one and two: they are the same size. **The class API does not tree-shake the
 time zone engine away.** `ChronoInstant.inZone()` statically references `ChronoZoned`,
@@ -635,16 +645,16 @@ which pulls in `zone.js`, so importing `ChronoInstant` alone still costs you the
 engine — and adding `ChronoZoned` to the import costs nothing extra, because it was
 already in your bundle.
 
-That is a deliberate trade: `inZone()` is the most useful method on the type, and 5 kB
+That is a deliberate trade: `inZone()` is the most useful method on the type, and ~8 kB
 gzipped is a reasonable price for it. If you only ever work in UTC and the kilobytes
 matter, import the raw layer instead and tree-shaking works properly:
 
 ```ts
-import { parseISO, addDays, toISO } from 'chronofast/core';   // 1.76 kB gzipped
+import { parseISO, addDays, toISO } from 'chronofast/core';   // 1.86 kB gzipped
 ```
 
 Minification only happens in a production build — `vite build`, webpack
-`mode: 'production'`, `next build`. A dev server serves it unminified (6.77 kB gzipped),
+`mode: 'production'`, `next build`. A dev server serves it unminified (17.5 kB gzipped),
 and Rollup or esbuild invoked directly minify only when told to.
 
 ### Which JavaScript version
