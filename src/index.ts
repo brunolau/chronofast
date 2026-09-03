@@ -26,7 +26,9 @@ import {
   InvalidInstantError,
 } from './brand.js';
 import {
-  parseISO, parseISOWall, hasZoneDesignator, hasUtcDesignator, toISO, toISODate, unpack, readFields,
+  parseISO, parseISOWall, parseISOZonedWall, parseISODate,
+  hasZoneDesignator, hasUtcDesignator,
+  toISO, toISODate, unpack, readFields,
   pad2, pad3, pad4, year6, daysFromCivil, MS_DAY, civilFromDays, dayIndexOf, isoDateOfDay,
   isRepresentable,
   daysInMonth as daysInMonthRaw, isLeapYear as isLeapYearRaw,
@@ -52,6 +54,73 @@ import { cY, cM, cD, cH, cMi, cS, cMs } from './core.js';
 // Module-local unit constants. Reading these through a cross-module import binding costs
 // measurably more on one-line methods than a local const does.
 const SEC = 1000, MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
+const MAX_TIME = 8.64e15;
+const MIN_DATE_DAY = -100_000_001, MAX_DATE_DAY = 100_000_000;
+const inTimeRange = (n: number): boolean => n >= -MAX_TIME && n <= MAX_TIME;
+
+const checkedAmount = (n: number): number => {
+  if (!Number.isInteger(n)) throw new RangeError(`Amount must be a finite integer: ${n}`);
+  return n;
+};
+const checkedWallMs = (wall: number): WallMs => {
+  if (!isRepresentable(wall)) throw new RangeError(`Invalid wall-clock millisecond value: ${wall}`);
+  return unsafeWallMs(wall);
+};
+const checkedZonedWall = (wall: number): number => {
+  const limit = MAX_TIME + DAY;
+  if (!Number.isInteger(wall) || wall <= -limit || wall >= limit) {
+    throw new RangeError(`Invalid zoned wall-clock millisecond value: ${wall}`);
+  }
+  return wall;
+};
+const isValidDayIndex = (day: number): boolean =>
+  Number.isInteger(day) && day >= MIN_DATE_DAY && day <= MAX_DATE_DAY;
+const checkedDayIndex = (day: number): DayIndex => {
+  if (!isValidDayIndex(day)) throw new RangeError(`Invalid calendar day: ${day}`);
+  return unsafeDayIndex(day);
+};
+
+// The branded constructors are intentionally unchecked. Public factories guarantee that a
+// valid receiver either produces another representable value or throws. Keep receiver
+// validation on the error path so the ordinary arithmetic path stays a pair of comparisons;
+// a manually-constructed finite value outside the documented constructor contract is not a
+// supported receiver. The NaN sentinel still propagates because every comparison with it fails.
+const checkedInstantResult = (base: number, result: number): EpochMs => {
+  if (!inTimeRange(result) && isRepresentable(base)) throw new InvalidInstantError(result);
+  return unsafeEpochMs(result);
+};
+const checkedWallResult = (base: number, result: number): WallMs => {
+  if (!inTimeRange(result) && isRepresentable(base)) {
+    throw new RangeError(`Invalid wall-clock millisecond value: ${result}`);
+  }
+  return unsafeWallMs(result);
+};
+const checkedDayResult = (base: number, result: number): DayIndex => {
+  if ((!Number.isInteger(result) || result < MIN_DATE_DAY || result > MAX_DATE_DAY)
+      && isValidDayIndex(base)) {
+    throw new RangeError(`Invalid calendar day: ${result}`);
+  }
+  return unsafeDayIndex(result);
+};
+
+const invalidFields = (): never => { throw new RangeError('Invalid calendar fields'); };
+const calendarDay = (y: number, m: number, d: number): DayIndex => {
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d) ||
+      m < 1 || m > 12 || d < 1 || d > daysInMonthRaw(y, m)) invalidFields();
+  return checkedDayIndex(daysFromCivil(y, m, d));
+};
+const timeWithinDay = (h: number, mi: number, s: number, ms: number): number => {
+  if (!Number.isInteger(h) || !Number.isInteger(mi) || !Number.isInteger(s) ||
+      !Number.isInteger(ms) || h < 0 || h > 23 || mi < 0 || mi > 59 ||
+      s < 0 || s > 59 || ms < 0 || ms > 999) invalidFields();
+  return h * HOUR + mi * MIN + s * SEC + ms;
+};
+const calendarWall = (
+  y: number, m: number, d: number, h: number, mi: number, s: number, ms: number,
+): WallMs => checkedWallMs(calendarDay(y, m, d) * DAY + timeWithinDay(h, mi, s, ms));
+const calendarZonedWall = (
+  y: number, m: number, d: number, h: number, mi: number, s: number, ms: number,
+): number => checkedZonedWall(calendarDay(y, m, d) * DAY + timeWithinDay(h, mi, s, ms));
 
 // ============================================================ ChronoInstant
 
@@ -78,7 +147,8 @@ export class ChronoInstant {
 
   /**
    * Wraps an already-validated instant. Performs **no** checking - the branded parameter
-   * type is the guard. For untrusted input use {@link ChronoInstant.fromEpochMs}.
+   * type is the guard. For untrusted input use {@link ChronoInstant.fromEpochMs}. Passing a
+   * manually-cast invalid value violates this contract; later arithmetic is unspecified.
    */
   constructor(ms: EpochMs) {
     this.ms = ms;
@@ -117,7 +187,7 @@ export class ChronoInstant {
     return ms !== ms ? null : new ChronoInstant(ms);
   }
 
-  /** Validates. Throws `InvalidInstantError` on NaN, Infinity, or out-of-range input. */
+  /** Validates. Throws `InvalidInstantError` unless `ms` is an integral, in-range instant. */
   static fromEpochMs(ms: number): ChronoInstant { return new ChronoInstant(checkedEpochMs(ms)); }
 
   /** The current moment. See also {@link Now}, which makes the choice of clock explicit. */
@@ -143,14 +213,22 @@ export class ChronoInstant {
 
   // ---- exact-time arithmetic; a calendar is not involved, so no zone is needed ----
 
-  /** Exact-time addition. `n` may be negative. */
-  addMilliseconds(n: number): ChronoInstant { return new ChronoInstant((this.ms + n) as EpochMs); }
+  /** Exact-time addition. `n` is a finite integer and may be negative. */
+  addMilliseconds(n: number): ChronoInstant {
+    return new ChronoInstant(checkedInstantResult(this.ms, this.ms + checkedAmount(n)));
+  }
   /** Add `n` seconds of elapsed time. */
-  addSeconds(n: number): ChronoInstant { return new ChronoInstant((this.ms + n * SEC) as EpochMs); }
+  addSeconds(n: number): ChronoInstant {
+    return new ChronoInstant(checkedInstantResult(this.ms, this.ms + checkedAmount(n) * SEC));
+  }
   /** Add `n` minutes of elapsed time. */
-  addMinutes(n: number): ChronoInstant { return new ChronoInstant((this.ms + n * MIN) as EpochMs); }
+  addMinutes(n: number): ChronoInstant {
+    return new ChronoInstant(checkedInstantResult(this.ms, this.ms + checkedAmount(n) * MIN));
+  }
   /** Add `n` hours of elapsed time. */
-  addHours(n: number): ChronoInstant { return new ChronoInstant((this.ms + n * HOUR) as EpochMs); }
+  addHours(n: number): ChronoInstant {
+    return new ChronoInstant(checkedInstantResult(this.ms, this.ms + checkedAmount(n) * HOUR));
+  }
   /**
    * Add `n` spans of exactly 24 hours.
    *
@@ -158,7 +236,9 @@ export class ChronoInstant {
    * calendar day in a zone - for that, go through {@link inZone} first, where a day may be
    * 23 or 25 hours.
    */
-  addDays(n: number): ChronoInstant { return new ChronoInstant((this.ms + n * DAY) as EpochMs); }
+  addDays(n: number): ChronoInstant {
+    return new ChronoInstant(checkedInstantResult(this.ms, this.ms + checkedAmount(n) * DAY));
+  }
 
   /**
    * Elapsed milliseconds from this moment to `other`. Negative if `other` is earlier.
@@ -205,7 +285,7 @@ export class ChronoInstant {
   toUtcPlain(): ChronoPlain { return new ChronoPlain(unsafeWallMs(this.ms)); }
 
   /** Convert to a native `Date`. The moment is preserved exactly. */
-  toDate(): Date { return new Date(this.ms); }
+  toDate(): Date { return new Date(isRepresentable(this.ms) ? this.ms : Number.NaN); }
 
   /** `YYYY-MM-DDTHH:mm:ss.sssZ` - byte-identical to `Date#toISOString()`. */
   toISOString(): string { return toISO(this.ms); }
@@ -276,7 +356,10 @@ export class ChronoPlain {
    */
   readonly wall: WallMs;
 
-  /** Wraps an already-validated reading. Performs no checking. */
+  /**
+   * Wraps an already-validated reading. Performs no checking. Arithmetic is unspecified if
+   * a manually-cast invalid value is passed; use {@link ChronoPlain.of} for numeric input.
+   */
   constructor(wall: WallMs) {
     this.wall = wall;
   }
@@ -303,8 +386,7 @@ export class ChronoPlain {
    * @param mo Month, **1-12**. January is 1.
    */
   static of(y: number, mo: number, d: number, h = 0, mi = 0, s = 0, ms = 0): ChronoPlain {
-    return new ChronoPlain(unsafeWallMs(
-      daysFromCivil(y, mo, d) * MS_DAY + h * HOUR + mi * MIN + s * SEC + ms));
+    return new ChronoPlain(calendarWall(y, mo, d, h, mi, s, ms));
   }
 
   /** The current reading in `tz` - the system zone by default. */
@@ -347,46 +429,65 @@ export class ChronoPlain {
   // ---- calendar arithmetic; no zone is involved, so no DST is involved either ----
 
   /** Add `n` milliseconds to the reading. */
-  addMilliseconds(n: number): ChronoPlain { return new ChronoPlain((this.wall + n) as WallMs); }
+  addMilliseconds(n: number): ChronoPlain {
+    return new ChronoPlain(checkedWallResult(this.wall, this.wall + checkedAmount(n)));
+  }
   /** Add `n` seconds to the reading. */
-  addSeconds(n: number): ChronoPlain { return new ChronoPlain((this.wall + n * SEC) as WallMs); }
+  addSeconds(n: number): ChronoPlain {
+    return new ChronoPlain(checkedWallResult(this.wall, this.wall + checkedAmount(n) * SEC));
+  }
   /** Add `n` minutes to the reading. */
-  addMinutes(n: number): ChronoPlain { return new ChronoPlain((this.wall + n * MIN) as WallMs); }
+  addMinutes(n: number): ChronoPlain {
+    return new ChronoPlain(checkedWallResult(this.wall, this.wall + checkedAmount(n) * MIN));
+  }
   /** Add `n` hours to the reading. */
-  addHours(n: number): ChronoPlain { return new ChronoPlain((this.wall + n * HOUR) as WallMs); }
+  addHours(n: number): ChronoPlain {
+    return new ChronoPlain(checkedWallResult(this.wall, this.wall + checkedAmount(n) * HOUR));
+  }
   /** Add `n` days to the reading. Always exactly 24 hours - a reading has no DST. */
-  addDays(n: number): ChronoPlain { return new ChronoPlain((this.wall + n * DAY) as WallMs); }
+  addDays(n: number): ChronoPlain {
+    return new ChronoPlain(checkedWallResult(this.wall, this.wall + checkedAmount(n) * DAY));
+  }
   /** Add `n * 7` days to the reading. */
-  addWeeks(n: number): ChronoPlain { return new ChronoPlain((this.wall + n * 7 * DAY) as WallMs); }
+  addWeeks(n: number): ChronoPlain {
+    return new ChronoPlain(checkedWallResult(
+      this.wall, this.wall + checkedAmount(n) * 7 * DAY));
+  }
   /**
    * Add `n` calendar months, **clamping to the end of the target month**.
    * @example ChronoPlain.parse('2024-01-31').addMonths(1).toISODate()   // '2024-02-29'
    */
   addMonths(n: number): ChronoPlain {
-    return new ChronoPlain(unsafeWallMs(addMonthsRaw(this.wall as unknown as EpochMs, n)));
+    return new ChronoPlain(checkedWallResult(this.wall, addMonthsRaw(
+      this.wall as unknown as EpochMs, checkedAmount(n))));
   }
   /** Add `n * 12` months, clamping. */
   addYears(n: number): ChronoPlain {
-    return new ChronoPlain(unsafeWallMs(addYearsRaw(this.wall as unknown as EpochMs, n)));
+    return new ChronoPlain(checkedWallResult(this.wall, addYearsRaw(
+      this.wall as unknown as EpochMs, checkedAmount(n))));
   }
 
   /** Truncate to the start of this minute. */
-  startOfMinute(): ChronoPlain { return new ChronoPlain(unsafeWallMs(startOfMinuteRaw(this.wall as unknown as EpochMs))); }
+  startOfMinute(): ChronoPlain { return new ChronoPlain(checkedWallResult(this.wall, startOfMinuteRaw(this.wall as unknown as EpochMs))); }
   /** Truncate to the top of this hour. */
-  startOfHour(): ChronoPlain { return new ChronoPlain(unsafeWallMs(startOfHourRaw(this.wall as unknown as EpochMs))); }
+  startOfHour(): ChronoPlain { return new ChronoPlain(checkedWallResult(this.wall, startOfHourRaw(this.wall as unknown as EpochMs))); }
   /** Midnight of this day. */
-  startOfDay(): ChronoPlain { return new ChronoPlain(unsafeWallMs(startOfDayRaw(this.wall as unknown as EpochMs))); }
+  startOfDay(): ChronoPlain { return new ChronoPlain(checkedWallResult(this.wall, startOfDayRaw(this.wall as unknown as EpochMs))); }
   /**
    * Midnight on the first day of this week.
    * @param firstDay `0` = Sunday … `6` = Saturday. Defaults to `1`, Monday (ISO).
    */
   startOfWeek(firstDay?: number): ChronoPlain {
-    return new ChronoPlain(unsafeWallMs(startOfWeekRaw(this.wall as unknown as EpochMs, firstDay)));
+    if (firstDay !== undefined && (!Number.isInteger(firstDay) || firstDay < 0 || firstDay > 6)) {
+      throw new RangeError(`Invalid first day of week: ${firstDay}`);
+    }
+    return new ChronoPlain(checkedWallResult(
+      this.wall, startOfWeekRaw(this.wall as unknown as EpochMs, firstDay)));
   }
   /** Midnight on the first day of this month. */
-  startOfMonth(): ChronoPlain { return new ChronoPlain(unsafeWallMs(startOfMonthRaw(this.wall as unknown as EpochMs))); }
+  startOfMonth(): ChronoPlain { return new ChronoPlain(checkedWallResult(this.wall, startOfMonthRaw(this.wall as unknown as EpochMs))); }
   /** Midnight on 1 January of this year. */
-  startOfYear(): ChronoPlain { return new ChronoPlain(unsafeWallMs(startOfYearRaw(this.wall as unknown as EpochMs))); }
+  startOfYear(): ChronoPlain { return new ChronoPlain(checkedWallResult(this.wall, startOfYearRaw(this.wall as unknown as EpochMs))); }
 
   /** Whole calendar days from this reading to `other`. */
   daysUntil(other: ChronoPlain): number {
@@ -471,7 +572,11 @@ export class ChronoPlain {
    */
   assumeZone(tz: TimeZoneId | string, disambiguation: Disambiguation = 'compatible'): ChronoZoned {
     const zoneId = checkedZone(tz);
-    return new ChronoZoned(utcFromWall(zoneId, this.wall, disambiguation), zoneId);
+    if (!isRepresentable(this.wall)) {
+      return new ChronoZoned(unsafeEpochMs(this.wall as unknown as number), zoneId);
+    }
+    return new ChronoZoned(
+      checkedInstantResult(this.wall, utcFromWall(zoneId, this.wall, disambiguation)), zoneId);
   }
 
   /**
@@ -498,7 +603,8 @@ export class ChronoPlain {
    * carry a time at all, which is the difference between this and `startOfDay()`.
    */
   toPlainDate(): ChronoDate {
-    return new ChronoDate(dayIndexOf(this.wall));
+    return new ChronoDate(
+      isRepresentable(this.wall) ? dayIndexOf(this.wall) : unsafeDayIndex(Number.NaN));
   }
 
   /** `YYYY-MM-DD`. Identical to `Temporal.PlainDate#toString()`. */
@@ -543,7 +649,10 @@ export class ChronoDate {
   /** Days since 1970-01-01. Negative before it. */
   readonly dayIndex: DayIndex;
 
-  /** Wraps a day index directly. Prefer {@link parse}, {@link of} or {@link now}. */
+  /**
+   * Wraps an already-validated day index directly and performs no checking. Arithmetic is
+   * unspecified for an invalid value; prefer {@link parse}, {@link of} or {@link now}.
+   */
   constructor(dayIndex: DayIndex | number) {
     this.dayIndex = dayIndex as DayIndex;
   }
@@ -568,15 +677,15 @@ export class ChronoDate {
    * Throws `InvalidInstantError` (a `RangeError`) on malformed input; see {@link tryParse}.
    */
   static parse(s: string): ChronoDate {
-    const wall = parseISOWall(s);
-    if (wall !== wall || hasUtcDesignator(s)) throw new InvalidInstantError(s);
-    return new ChronoDate(dayIndexOf(wall));
+    const day = parseISODate(s);
+    if (day !== day || hasUtcDesignator(s)) throw new InvalidInstantError(s);
+    return new ChronoDate(day);
   }
 
   /** Like {@link parse}, but returns `null` instead of throwing. */
   static tryParse(s: string): ChronoDate | null {
-    const wall = parseISOWall(s);
-    return wall !== wall || hasUtcDesignator(s) ? null : new ChronoDate(dayIndexOf(wall));
+    const day = parseISODate(s);
+    return day !== day || hasUtcDesignator(s) ? null : new ChronoDate(day);
   }
 
   /**
@@ -584,7 +693,7 @@ export class ChronoDate {
    * @param m Month, **1-12** - January is 1, not 0.
    */
   static of(y: number, m: number, d: number): ChronoDate {
-    return new ChronoDate(unsafeDayIndex(daysFromCivil(y, m, d)));
+    return new ChronoDate(calendarDay(y, m, d));
   }
 
   /** Today's date in `tz`, or in the host zone when omitted. */
@@ -599,8 +708,8 @@ export class ChronoDate {
     return a.dayIndex < b.dayIndex ? -1 : a.dayIndex > b.dayIndex ? 1 : 0;
   }
 
-  /** `false` if this was built from a NaN day index. */
-  get isValid(): boolean { return isRepresentable(this.dayIndex * MS_DAY); }
+  /** Whether this is an integral day inside the supported calendar range. */
+  get isValid(): boolean { return isValidDayIndex(this.dayIndex); }
 
   /** Calendar year. Negative before 1 CE. */
   get year(): number { civilFromDays(this.dayIndex); return cY; }
@@ -630,33 +739,45 @@ export class ChronoDate {
   }
 
   /** Add `n` days. One integer add - no calendar conversion at all. */
-  addDays(n: number): ChronoDate { return new ChronoDate(unsafeDayIndex(this.dayIndex + n)); }
+  addDays(n: number): ChronoDate {
+    return new ChronoDate(checkedDayResult(
+      this.dayIndex, this.dayIndex + checkedAmount(n)));
+  }
   /** Add `n * 7` days. */
-  addWeeks(n: number): ChronoDate { return new ChronoDate(unsafeDayIndex(this.dayIndex + n * 7)); }
+  addWeeks(n: number): ChronoDate {
+    return new ChronoDate(checkedDayResult(
+      this.dayIndex, this.dayIndex + checkedAmount(n) * 7));
+  }
   /** Add `n` calendar months, **clamping to the end of the target month**. */
   addMonths(n: number): ChronoDate {
-    return new ChronoDate(unsafeDayIndex(addMonthsOfDay(this.dayIndex, n)));
+    return new ChronoDate(checkedDayResult(
+      this.dayIndex, addMonthsOfDay(this.dayIndex, checkedAmount(n))));
   }
   /** Add `n` calendar years. 29 Feb + 1 year is 28 Feb. */
   addYears(n: number): ChronoDate {
-    return new ChronoDate(unsafeDayIndex(addMonthsOfDay(this.dayIndex, n * 12)));
+    return new ChronoDate(checkedDayResult(
+      this.dayIndex, addMonthsOfDay(this.dayIndex, checkedAmount(n) * 12)));
   }
 
   /** The first day of this month. */
   startOfMonth(): ChronoDate {
-    return new ChronoDate(unsafeDayIndex(startOfMonthOfDay(this.dayIndex)));
+    return new ChronoDate(checkedDayResult(this.dayIndex, startOfMonthOfDay(this.dayIndex)));
   }
   /** The last day of this month. */
   endOfMonth(): ChronoDate {
-    return new ChronoDate(unsafeDayIndex(endOfMonthOfDay(this.dayIndex)));
+    return new ChronoDate(checkedDayResult(this.dayIndex, endOfMonthOfDay(this.dayIndex)));
   }
   /** 1 January of this year. */
   startOfYear(): ChronoDate {
-    return new ChronoDate(unsafeDayIndex(startOfYearOfDay(this.dayIndex)));
+    return new ChronoDate(checkedDayResult(this.dayIndex, startOfYearOfDay(this.dayIndex)));
   }
   /** @param firstDay 1 = Monday (the ISO default), 7 = Sunday. */
   startOfWeek(firstDay = 1): ChronoDate {
-    return new ChronoDate(unsafeDayIndex(startOfWeekOfDay(this.dayIndex, firstDay)));
+    if (!Number.isInteger(firstDay) || firstDay < 1 || firstDay > 7) {
+      throw new RangeError(`Invalid first day of week: ${firstDay}`);
+    }
+    return new ChronoDate(checkedDayResult(
+      this.dayIndex, startOfWeekOfDay(this.dayIndex, firstDay)));
   }
 
   /** Whole days from this date to `other`. Negative if `other` is earlier. One subtract. */
@@ -686,8 +807,9 @@ export class ChronoDate {
    * @param h Hour, 0-23. Defaults to midnight; see also {@link atTime}.
    */
   toPlain(h = 0, mi = 0, s = 0, msec = 0): ChronoPlain {
-    return new ChronoPlain(unsafeWallMs(
-      this.dayIndex * MS_DAY + h * 3_600_000 + mi * 60_000 + s * 1000 + msec));
+    const time = timeWithinDay(h, mi, s, msec);
+    if (!this.isValid) return new ChronoPlain(unsafeWallMs(Number.NaN));
+    return new ChronoPlain(checkedWallMs(this.dayIndex * DAY + time));
   }
 
   /** This date at a given wall-clock time. `d.atTime(14, 30)` reads 14:30 on that date. */
@@ -701,11 +823,12 @@ export class ChronoDate {
    */
   atStartOfDay(tz: TimeZoneId | string, disambiguation: Disambiguation = 'compatible'): ChronoZoned {
     const zoneId = checkedZone(tz);
+    if (!this.isValid) return new ChronoZoned(unsafeEpochMs(Number.NaN), zoneId);
     // The day index is a LOCAL date, so it names a wall clock, not an instant. Feeding
     // `dayIndex * MS_DAY` to startOfDayZoned as if it were UTC lands in the previous day
     // for every zone west of Greenwich.
-    return new ChronoZoned(
-      utcFromWall(zoneId, unsafeWallMs(this.dayIndex * MS_DAY), disambiguation), zoneId);
+    return new ChronoZoned(checkedEpochMs(
+      utcFromWall(zoneId, unsafeWallMs(this.dayIndex * MS_DAY), disambiguation)), zoneId);
   }
 
   /** `YYYY-MM-DD`. Identical to `Temporal.PlainDate#toString()`. */
@@ -753,7 +876,10 @@ export class ChronoDate {
     if (namesATimeComponent(options)) {
       throw new TypeError('Invalid formatting options: a ChronoDate has no time of day');
     }
-    return formatLocale(this.dayIndex * MS_DAY, 'UTC', locales, options, 1);
+    if (!this.isValid) return 'Invalid Date';
+    const ms = this.dayIndex * MS_DAY;
+    if (!isRepresentable(ms)) throw new RangeError('Invalid time value');
+    return formatLocale(ms, 'UTC', locales, options, 1);
   }
 
   /** The day index, so `<`, `>` and `-` work between dates. `b - a` is whole days. */
@@ -794,7 +920,11 @@ export class ChronoZoned {
   /** The IANA zone id this moment is read through, e.g. `'Europe/Bratislava'`. */
   readonly tz: TimeZoneId | string;
 
-  /** Wraps an already-validated moment and zone. Performs no checking. */
+  /**
+   * Wraps an already-validated moment and zone. Performs no checking. Arithmetic is
+   * unspecified for manually-cast invalid input; use {@link ChronoZoned.fromEpochMs} for
+   * numeric input.
+   */
   constructor(ms: EpochMs, tz: TimeZoneId | string) {
     this.ms = ms;
     this.tz = tz;
@@ -813,10 +943,12 @@ export class ChronoZoned {
     disambiguation: Disambiguation = 'compatible',
   ): ChronoZoned {
     const zoneId = checkedZone(tz);
-    const ms = parseISO(s);
+    const designated = hasZoneDesignator(s);
+    const ms = designated ? parseISO(s) : parseISOZonedWall(s);
     if (ms !== ms) throw new InvalidInstantError(s);
-    if (hasZoneDesignator(s)) return new ChronoZoned(ms, zoneId);
-    return new ChronoZoned(utcFromWall(zoneId, unsafeWallMs(ms), disambiguation), zoneId);
+    if (designated) return new ChronoZoned(unsafeEpochMs(ms), zoneId);
+    return new ChronoZoned(checkedEpochMs(
+      utcFromWall(zoneId, unsafeWallMs(ms), disambiguation)), zoneId);
   }
 
   /** Like {@link parse}, but returns `null` instead of throwing on malformed input. */
@@ -825,12 +957,14 @@ export class ChronoZoned {
     tz: TimeZoneId | string,
     disambiguation: Disambiguation = 'compatible',
   ): ChronoZoned | null {
-    const ms = parseISO(s);
+    const designated = hasZoneDesignator(s);
+    const ms = designated ? parseISO(s) : parseISOZonedWall(s);
     if (ms !== ms) return null;
     const zoneId = checkedZone(tz);
-    if (hasZoneDesignator(s)) return new ChronoZoned(ms, zoneId);
+    if (designated) return new ChronoZoned(unsafeEpochMs(ms), zoneId);
     try {
-      return new ChronoZoned(utcFromWall(zoneId, unsafeWallMs(ms), disambiguation), zoneId);
+      return new ChronoZoned(checkedEpochMs(
+        utcFromWall(zoneId, unsafeWallMs(ms), disambiguation)), zoneId);
     } catch (error) {
       if (error instanceof InvalidInstantError) return null;
       throw error;
@@ -852,7 +986,10 @@ export class ChronoZoned {
     h = 0, mi = 0, s = 0, msec = 0,
     disambiguation: Disambiguation = 'compatible',
   ): ChronoZoned {
-    return ChronoPlain.of(y, mo, d, h, mi, s, msec).assumeZone(tz, disambiguation);
+    const wall = calendarZonedWall(y, mo, d, h, mi, s, msec);
+    const zoneId = checkedZone(tz);
+    return new ChronoZoned(checkedEpochMs(
+      utcFromWall(zoneId, unsafeWallMs(wall), disambiguation)), zoneId);
   }
 
   /** The current moment in `tz` - the system zone by default. */
@@ -899,24 +1036,52 @@ export class ChronoZoned {
   fields(): DateTimeFields { zonedFields(this.tz, this.ms); return readFields(); }
 
   /** Exactly `n` hours of elapsed time. Unaffected by DST. */
-  addHours(n: number): ChronoZoned { return new ChronoZoned((this.ms + n * HOUR) as EpochMs, this.tz); }
+  addHours(n: number): ChronoZoned {
+    return new ChronoZoned(
+      checkedInstantResult(this.ms, this.ms + checkedAmount(n) * HOUR), this.tz);
+  }
   /** Exactly `n` minutes of elapsed time. Unaffected by DST. */
-  addMinutes(n: number): ChronoZoned { return new ChronoZoned((this.ms + n * MIN) as EpochMs, this.tz); }
+  addMinutes(n: number): ChronoZoned {
+    return new ChronoZoned(
+      checkedInstantResult(this.ms, this.ms + checkedAmount(n) * MIN), this.tz);
+  }
   /** Exactly `n` seconds of elapsed time. Unaffected by DST. */
-  addSeconds(n: number): ChronoZoned { return new ChronoZoned((this.ms + n * SEC) as EpochMs, this.tz); }
+  addSeconds(n: number): ChronoZoned {
+    return new ChronoZoned(
+      checkedInstantResult(this.ms, this.ms + checkedAmount(n) * SEC), this.tz);
+  }
 
   /**
    * Adds `n` **calendar** days: the same wall-clock time on a later date. Across a DST
    * boundary this moves 23 or 25 hours, not 24. For exactly 24 hours use `addHours(24)`.
    */
-  addDays(n: number): ChronoZoned { return new ChronoZoned(addDaysZoned(this.tz, this.ms, n), this.tz); }
+  addDays(n: number): ChronoZoned {
+    const amount = checkedAmount(n);
+    if (!isRepresentable(this.ms)) return new ChronoZoned(this.ms, this.tz);
+    return new ChronoZoned(checkedInstantResult(
+      this.ms, addDaysZoned(this.tz, this.ms, amount)), this.tz);
+  }
   /** Adds `n` calendar months in local time, clamping to the end of the target month. */
-  addMonths(n: number): ChronoZoned { return new ChronoZoned(addMonthsZoned(this.tz, this.ms, n), this.tz); }
+  addMonths(n: number): ChronoZoned {
+    const amount = checkedAmount(n);
+    if (!isRepresentable(this.ms)) return new ChronoZoned(this.ms, this.tz);
+    return new ChronoZoned(checkedInstantResult(
+      this.ms, addMonthsZoned(this.tz, this.ms, amount)), this.tz);
+  }
   /** Adds `n * 12` calendar months in local time, clamping. */
-  addYears(n: number): ChronoZoned { return new ChronoZoned(addMonthsZoned(this.tz, this.ms, n * 12), this.tz); }
+  addYears(n: number): ChronoZoned {
+    const amount = checkedAmount(n);
+    if (!isRepresentable(this.ms)) return new ChronoZoned(this.ms, this.tz);
+    return new ChronoZoned(checkedInstantResult(
+      this.ms, addMonthsZoned(this.tz, this.ms, amount * 12)), this.tz);
+  }
 
   /** Local midnight of this day. Correct when local midnight does not exist. */
-  startOfDay(): ChronoZoned { return new ChronoZoned(startOfDayZoned(this.tz, this.ms), this.tz); }
+  startOfDay(): ChronoZoned {
+    if (!isRepresentable(this.ms)) return new ChronoZoned(this.ms, this.tz);
+    return new ChronoZoned(checkedInstantResult(
+      this.ms, startOfDayZoned(this.tz, this.ms)), this.tz);
+  }
 
   /** Elapsed milliseconds from this moment to `other`. Zones may differ. */
   millisecondsUntil(other: ChronoZoned): number { return other.ms - this.ms; }
@@ -961,15 +1126,29 @@ export class ChronoZoned {
     if (disambiguation === undefined && sameZoneId(tz, this.tz)) {
       return new ChronoZoned(this.ms, checkedZone(tz));
     }
-    return this.toPlain().assumeZone(tz, disambiguation ?? 'compatible');
+    const zoneId = checkedZone(tz);
+    if (!this.isValid) return new ChronoZoned(unsafeEpochMs(Number.NaN), zoneId);
+    // A valid endpoint instant can have a local reading just outside ChronoPlain's narrower
+    // range. Resolve that padded wall clock directly so a different offset can still move
+    // it back to a representable instant; utcFromWall validates the final instant.
+    const wall = checkedZonedWall(this.ms + offsetAt(this.tz, this.ms));
+    return new ChronoZoned(checkedEpochMs(utcFromWall(
+      zoneId, unsafeWallMs(wall), disambiguation ?? 'compatible')), zoneId);
   }
 
   /** The moment, without the zone. */
   toInstant(): ChronoInstant { return new ChronoInstant(this.ms); }
-  /** The local reading, without the zone - and therefore without a moment. */
-  toPlain(): ChronoPlain { return new ChronoPlain(unsafeWallMs(this.ms + offsetAt(this.tz, this.ms))); }
+  /**
+   * The local reading, without the zone - and therefore without a moment.
+   * May throw at the extreme instant boundaries when the zone offset moves the local
+   * reading outside {@link ChronoPlain}'s representable wall-clock range.
+   */
+  toPlain(): ChronoPlain {
+    if (!this.isValid) return new ChronoPlain(unsafeWallMs(Number.NaN));
+    return new ChronoPlain(checkedWallMs(this.ms + offsetAt(this.tz, this.ms)));
+  }
   /** Convert to a native `Date`. The moment is preserved; the zone is lost. */
-  toDate(): Date { return new Date(this.ms); }
+  toDate(): Date { return new Date(isRepresentable(this.ms) ? this.ms : Number.NaN); }
 
   /** Local ISO-8601 with offset, e.g. `2024-03-15T11:30:00.123+01:00`. No zone id. */
   toISOString(): string { return formatZoned(this.tz, this.ms); }
@@ -979,7 +1158,8 @@ export class ChronoZoned {
    * zone can answer, and this one has it.
    */
   toPlainDate(): ChronoDate {
-    return new ChronoDate(dayIndexOf(this.ms + offsetAt(this.tz, this.ms)));
+    if (!this.isValid) return new ChronoDate(unsafeDayIndex(Number.NaN));
+    return new ChronoDate(checkedDayIndex(dayIndexOf(this.ms + offsetAt(this.tz, this.ms))));
   }
 
   /** Local `YYYY-MM-DD`, which can differ from the UTC date. */

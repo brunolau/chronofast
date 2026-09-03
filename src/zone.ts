@@ -19,7 +19,8 @@
 import type { EpochMs, WallMs, OffsetMs, TimeZoneId } from './brand.js';
 import { InvalidInstantError, unsafeEpochMs, unsafeWallMs, unsafeOffsetMs } from './brand.js';
 import { MS_SEC, MS_MIN, MS_HOUR, MS_DAY, daysFromCivil, civilFromDays, unpack, daysInMonth,
-         pad2, pad3, pad4, year6, cY, cM, cD, cH, cMi, cS, cMs } from './core.js';
+         pad2, pad3, pad4, year6, isRepresentable,
+         cY, cM, cD, cH, cMi, cS, cMs } from './core.js';
 
 interface Run {
   readonly split: false;
@@ -394,6 +395,7 @@ const year4or6 = (y: number): string => (y >= 0 && y <= 9999 ? pad4(y) : year6(y
  * offset-string cache lookup. Measured 16% faster.
  */
 export function formatZoned(tz: TimeZoneId | string, utcMs: EpochMs): string {
+  if (!isRepresentable(utcMs)) throw new RangeError('Invalid time value');
   const off = offsetAt(tz, utcMs);
   const wall = utcMs + off;
   const days = Math.floor(wall / MS_DAY);
@@ -431,6 +433,7 @@ let zDayVal = '';
 
 /** Local `YYYY-MM-DD` - the grouping key for "events per day in the user's zone". */
 export function toZonedISODate(tz: TimeZoneId | string, utcMs: EpochMs): string {
+  if (!isRepresentable(utcMs)) throw new RangeError('Invalid time value');
   const wallDay = Math.floor((utcMs + offsetAt(tz, utcMs)) / MS_DAY);
   if (wallDay === zDayIdx && tz === zDayTz) return zDayVal;
   civilFromDays(wallDay);
@@ -536,7 +539,7 @@ export function formatLocale(
   options: Intl.DateTimeFormatOptions | undefined,
   kind: 0 | 1 | 2 | 3,
 ): string {
-  if (ms !== ms) return 'Invalid Date';
+  if (!isRepresentable(ms)) return 'Invalid Date';
   const base = kind === 1 ? DEFAULT_DATE : kind === 2 ? DEFAULT_TIME
              : kind === 3 ? DEFAULT_ZONED : DEFAULT_DATE_TIME;
   const hasOwn = options !== undefined && hasDateTimeComponent(options);

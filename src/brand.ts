@@ -42,7 +42,7 @@ export type TimeZoneId = Brand<string, 'TimeZoneId'>;
 
 const MAX_EPOCH_MS = 8.64e15; // the ECMAScript time-value limit
 
-/** Thrown when a value cannot be an instant: NaN, Infinity, or outside +-8.64e15 ms. */
+/** Thrown when a value cannot be an instant: fractional, non-finite, or outside +-8.64e15 ms. */
 export class InvalidInstantError extends RangeError {
   /**
    * @param value The number, or the string, that could not be an instant.
@@ -67,9 +67,9 @@ export class UnknownTimeZoneError extends RangeError {
   }
 }
 
-/** Checked constructor. Throws on NaN, Infinity, or out-of-range values. */
+/** Checked constructor. Throws on fractional, non-finite, or out-of-range values. */
 export function epochMs(n: number): EpochMs {
-  if (!Number.isFinite(n) || n < -MAX_EPOCH_MS || n > MAX_EPOCH_MS) {
+  if (!Number.isInteger(n) || n < -MAX_EPOCH_MS || n > MAX_EPOCH_MS) {
     throw new InvalidInstantError(n);
   }
   return n as EpochMs;
@@ -112,4 +112,4 @@ export const unsafeTimeZone = (id: string): TimeZoneId => id as TimeZoneId;
 
 /** The sentinel returned by parsing failures. Narrows an EpochMs to a definite value. */
 export const isValidInstant = (t: number): boolean =>
-  t >= -MAX_EPOCH_MS && t <= MAX_EPOCH_MS;
+  Number.isInteger(t) && t >= -MAX_EPOCH_MS && t <= MAX_EPOCH_MS;

@@ -162,16 +162,26 @@ const NOT_A_TIME = Number.NaN as EpochMs;
 
 /** The ECMAScript time-value limit. Beyond it a timestamp is not a date, it is a number. */
 const MAX_TIME = 8.64e15;
+const ISO_DATETIME_LIMIT = MAX_TIME + MS_DAY;
+const MIN_DATE_DAY = -100_000_001;
+const MAX_DATE_DAY = 100_000_000;
 
 /**
  * Whether `ms` can be serialised as a date at all.
  *
- * Written as `!(ms >= -MAX && ms <= MAX)` on purpose: every comparison with `NaN` is false,
- * so one expression rejects NaN, both infinities, and anything outside the representable
- * range. The earlier guard tested only `ms !== ms`, which let `Infinity` through to produce
- * `"Infinity-03-NaNT00:00:00.NaN"` - a string that looks enough like a date to be stored.
+ * The range comparison rejects NaN, both infinities, and values outside the representable
+ * range. The integer check enforces this library's documented millisecond precision.
  */
-const outOfRange = (ms: number): boolean => !(ms >= -MAX_TIME && ms <= MAX_TIME);
+const outOfRange = (ms: number): boolean =>
+  !Number.isInteger(ms) || !(ms >= -MAX_TIME && ms <= MAX_TIME);
+
+/** Convert a scanner result into a valid EpochMs or the parser's failure sentinel. */
+const parsedEpochMs = (ms: number): EpochMs =>
+  outOfRange(ms) ? NOT_A_TIME : unsafeEpochMs(ms);
+
+/** In wall mode syntax is checked here, while the caller applies its type-specific range. */
+const parsedScannerValue = (ms: number, keepWall: boolean): EpochMs =>
+  keepWall ? unsafeEpochMs(ms) : parsedEpochMs(ms);
 
 /**
  * The offset {@link parseISO} removed from the last string it read, in milliseconds, such
@@ -244,7 +254,7 @@ export function parseISO(s: string): EpochMs {
   return parseISOGeneral(s, n);
 }
 
-function parseISOGeneral(s: string, n: number): EpochMs {
+function parseISOGeneral(s: string, n: number, keepWall = false): EpochMs {
   if (n < 10) return NOT_A_TIME;
 
   let i = 0;
@@ -335,10 +345,12 @@ function parseISOGeneral(s: string, n: number): EpochMs {
                h * MS_HOUR + mi * MS_MIN + sec * MS_SEC + frac;
 
   parsedOffsetMs = 0;
-  if (i >= n) return unsafeEpochMs(base);
+  if (i >= n) return parsedScannerValue(base, keepWall);
 
   const z = s.charCodeAt(i);
-  if (z === 90 || z === 122) return i + 1 === n ? unsafeEpochMs(base) : NOT_A_TIME;
+  if (z === 90 || z === 122) {
+    return i + 1 === n ? parsedScannerValue(base, keepWall) : NOT_A_TIME;
+  }
   if (z !== 43 && z !== 45) return NOT_A_TIME;
 
   const oh1 = s.charCodeAt(i + 1) - 48, oh2 = s.charCodeAt(i + 2) - 48;
@@ -374,7 +386,7 @@ function parseISOGeneral(s: string, n: number): EpochMs {
 
   const off = oh * MS_HOUR + om * MS_MIN + os * MS_SEC;
   parsedOffsetMs = z === 45 ? -off : off;
-  return unsafeEpochMs(z === 45 ? base + off : base - off);
+  return parsedScannerValue(keepWall ? base : z === 45 ? base + off : base - off, keepWall);
 }
 
 /**
@@ -386,9 +398,43 @@ function parseISOGeneral(s: string, n: number): EpochMs {
  * only sensible answer for a type with no zone: the string says the clock on the wall read
  * 23:30, and shifting it to 04:30 the next day silently changes the time and the date both.
  */
-export function parseISOWall(s: string): WallMs {
+const parseISOWallValue = (s: string): number => {
   const ms = parseISO(s);
-  return (ms !== ms ? ms : ms + parsedOffsetMs) as unknown as WallMs;
+  // A representable wall clock at either range boundary can name an instant outside that
+  // range once its offset is applied. Retry the general scanner in wall mode so an offset
+  // that this API deliberately discards cannot make an otherwise-valid reading fail.
+  return ms !== ms ? parseISOGeneral(s, s.length, true) : ms + parsedOffsetMs;
+};
+
+export function parseISOWall(s: string): WallMs {
+  const wall = parseISOWallValue(s);
+  return (outOfRange(wall) ? NOT_A_TIME : wall) as unknown as WallMs;
+}
+
+/**
+ * Parse a wall clock that will immediately be resolved through a time zone. Temporal gives
+ * this intermediate representation one day of padding on either side of the instant range,
+ * so every boundary instant can be reached through every possible zone offset. The bounds
+ * are open; the final resolved instant still has to pass the ordinary ±8.64e15 ms check.
+ */
+export function parseISOZonedWall(s: string): number {
+  const wall = parseISOWallValue(s);
+  return Number.isInteger(wall) && wall > -ISO_DATETIME_LIMIT && wall < ISO_DATETIME_LIMIT
+    ? wall
+    : NOT_A_TIME;
+}
+
+/**
+ * Parse a complete ISO string and return its written calendar day, discarding time and
+ * offset. A date has a slightly wider lower bound than an ECMAScript instant, so it must
+ * not be range-checked through {@link parseISOWall} first.
+ */
+export function parseISODate(s: string): DayIndex {
+  const wall = parseISOWallValue(s);
+  const day = Math.floor(wall / MS_DAY);
+  return (day >= MIN_DATE_DAY && day <= MAX_DATE_DAY)
+    ? unsafeDayIndex(day)
+    : NOT_A_TIME as unknown as DayIndex;
 }
 
 /**
@@ -538,7 +584,9 @@ export function toISO(ms: EpochMs): string {
  * stores a day index rather than a timestamp, and it shares the same day-string memo.
  */
 export const isoDateOfDay = (dayIdx: DayIndex | number): string => {
-  if (outOfRange(dayIdx * MS_DAY)) throw new RangeError('Invalid time value');
+  if (!Number.isInteger(dayIdx) || dayIdx < MIN_DATE_DAY || dayIdx > MAX_DATE_DAY) {
+    throw new RangeError('Invalid time value');
+  }
   return dayString(dayIdx);
 };
 
@@ -866,7 +914,8 @@ export function resetMemos(): void {
 }
 
 /**
- * Whether a millisecond value can be a date: finite, and inside the ECMAScript time range.
+ * Whether a millisecond value can be a date: integral, finite, and inside the ECMAScript
+ * time range.
  * `isValid` on every class routes through this, so `Infinity` reports invalid rather than
  * claiming to be a date and then serialising as one.
  */

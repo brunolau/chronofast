@@ -187,7 +187,7 @@ plausible-looking wrong number.
 ```ts
 ChronoInstant.parse('2024-03-15T10:30:00.000Z')   // throws on malformed input
 ChronoInstant.tryParse(untrusted)                 // null instead of throwing
-ChronoInstant.fromEpochMs(1710498600000)          // throws if not a finite instant
+ChronoInstant.fromEpochMs(1710498600000)          // throws unless integral and in range
 ChronoInstant.fromDate(new Date())
 ChronoInstant.now()                               // UTC — see "Reading now" below
 ```
@@ -369,6 +369,10 @@ import { dayOfWeekSunday0 } from 'chronofast/core';   // 0 = Sunday … 6 = Satu
 Every range above is stated in the JSDoc, so it appears in editor tooltips and in the
 generated `.d.ts` rather than only here.
 
+The component factories (`ChronoPlain.of`, `ChronoDate.of`, and
+`ChronoZoned.fromLocal`) reject fractional or impossible fields rather than balancing
+them into a different date. For example, 30 February and hour 24 throw `RangeError`.
+
 ### Instants and wall-clock readings are different things
 
 `2000-09-01T10:00Z` names a moment. `2000-09-01T10:00` does not — it is a reading off a
@@ -496,11 +500,24 @@ database timestamps through chronofast, either keep the original string alongsid
 parsed value or accept the truncation deliberately. This is the one place where migrating
 from `Temporal` loses information rather than merely changing syntax.
 
+Numeric APIs do not have extra digits to discard: epoch milliseconds and arithmetic
+amounts must be finite integers, as Temporal duration fields must be. Use
+`addMilliseconds(500)`, not `addSeconds(0.5)`. Arithmetic throws `RangeError` instead of
+returning a value outside its type's representable range. Instants and wall clocks use the
+ECMAScript time range (±8.64e15 milliseconds); `ChronoDate` uses Temporal's complete
+calendar-date range, from `-271821-04-19` through `+275760-09-13`.
+
+The class constructors themselves are unchecked low-level entry points: they expect an
+already-validated branded value (or day index) so the ordinary arithmetic path pays no
+repeat-validation cost. Use `parse`, `of` and `from*` for numeric or untrusted input.
+Manually passing a fractional, non-finite or out-of-range value violates that constructor
+contract; arithmetic on such a receiver is unspecified.
+
 ### Errors
 
 | | thrown when |
 |---|---|
-| `InvalidInstantError` | `fromEpochMs` gets NaN, Infinity, or a value outside the ECMAScript time range |
+| `InvalidInstantError` | parsing or instant construction/arithmetic cannot produce an integral value inside the ECMAScript time range |
 | `UnknownTimeZoneError` | a zone id `Intl` does not recognise |
 | `AmbiguousTimeError` | `'reject'` disambiguation hits an ambiguous or nonexistent local time |
 
@@ -546,6 +563,11 @@ read the results before the next call. It is also the smaller import — see
 ## Limitations, stated plainly
 
 - **Millisecond precision.** Not nanoseconds. `Temporal` is strictly more capable here.
+- **Wall clocks use the ECMAScript ±8.64e15 ms range.** At the extreme instant boundaries,
+  a zone offset can move the corresponding local reading beyond that range, so
+  `ChronoZoned#toPlain()` throws even though the zoned instant itself remains valid.
+  `ChronoZoned.parse` and `fromLocal` accept the one-day padded intermediate range needed
+  to resolve such readings, but the resulting instant must still be inside ±8.64e15 ms.
 - **Proleptic Gregorian, ISO calendar only.** No Hebrew, Islamic, Japanese calendars.
 - **No `Duration` type**, no relative formatting, no parsing of human text.
 - **The zone engine assumes at most one offset transition per UTC day**, not reversing
