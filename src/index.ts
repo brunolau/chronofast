@@ -168,13 +168,21 @@ export class ChronoInstant {
    */
   millisecondsUntil(other: ChronoInstant): number { return other.ms - this.ms; }
   /** Elapsed whole seconds to `other`, truncated toward zero. */
-  secondsUntil(other: ChronoInstant): number { return ((other.ms - this.ms) / SEC) | 0; }
+  secondsUntil(other: ChronoInstant): number {
+    return Math.trunc((other.ms - this.ms) / SEC) || 0;
+  }
   /** Elapsed whole minutes to `other`, truncated toward zero. */
-  minutesUntil(other: ChronoInstant): number { return ((other.ms - this.ms) / MIN) | 0; }
+  minutesUntil(other: ChronoInstant): number {
+    return Math.trunc((other.ms - this.ms) / MIN) || 0;
+  }
   /** Elapsed whole hours to `other`, truncated toward zero. */
-  hoursUntil(other: ChronoInstant): number { return ((other.ms - this.ms) / HOUR) | 0; }
+  hoursUntil(other: ChronoInstant): number {
+    return Math.trunc((other.ms - this.ms) / HOUR) || 0;
+  }
   /** Elapsed whole 24-hour spans to `other`, truncated toward zero. */
-  daysUntil(other: ChronoInstant): number { return ((other.ms - this.ms) / DAY) | 0; }
+  daysUntil(other: ChronoInstant): number {
+    return Math.trunc((other.ms - this.ms) / DAY) || 0;
+  }
 
   /** Same moment, to the millisecond. */
   equals(other: ChronoInstant): boolean { return this.ms === other.ms; }
@@ -392,9 +400,13 @@ export class ChronoPlain {
   /** Elapsed milliseconds between the two readings. Negative if `other` is earlier. */
   millisecondsUntil(other: ChronoPlain): number { return other.wall - this.wall; }
   /** Whole minutes between the two readings, truncated toward zero. */
-  minutesUntil(other: ChronoPlain): number { return ((other.wall - this.wall) / MIN) | 0; }
+  minutesUntil(other: ChronoPlain): number {
+    return Math.trunc((other.wall - this.wall) / MIN) || 0;
+  }
   /** Whole hours between the two readings, truncated toward zero. */
-  hoursUntil(other: ChronoPlain): number { return ((other.wall - this.wall) / HOUR) | 0; }
+  hoursUntil(other: ChronoPlain): number {
+    return Math.trunc((other.wall - this.wall) / HOUR) || 0;
+  }
 
   /**
    * The underlying reading, so `<`, `>`, `<=` and `>=` order two readings correctly.
@@ -650,14 +662,16 @@ export class ChronoDate {
   /** Whole days from this date to `other`. Negative if `other` is earlier. One subtract. */
   daysUntil(other: ChronoDate): number { return other.dayIndex - this.dayIndex; }
   /** Whole weeks from this date to `other`, truncated toward zero. */
-  weeksUntil(other: ChronoDate): number { return ((other.dayIndex - this.dayIndex) / 7) | 0; }
+  weeksUntil(other: ChronoDate): number {
+    return Math.trunc((other.dayIndex - this.dayIndex) / 7) || 0;
+  }
   /** Whole calendar months from this date to `other`, truncated toward zero. */
   monthsUntil(other: ChronoDate): number {
     return diffMonthsOfDay(this.dayIndex, other.dayIndex);
   }
   /** Whole calendar years from this date to `other`, truncated toward zero. */
   yearsUntil(other: ChronoDate): number {
-    return (diffMonthsOfDay(this.dayIndex, other.dayIndex) / 12) | 0;
+    return Math.trunc(diffMonthsOfDay(this.dayIndex, other.dayIndex) / 12) || 0;
   }
 
   /** Same calendar date. */
@@ -907,9 +921,13 @@ export class ChronoZoned {
   /** Elapsed milliseconds from this moment to `other`. Zones may differ. */
   millisecondsUntil(other: ChronoZoned): number { return other.ms - this.ms; }
   /** Elapsed whole minutes to `other`, truncated toward zero. */
-  minutesUntil(other: ChronoZoned): number { return ((other.ms - this.ms) / MIN) | 0; }
+  minutesUntil(other: ChronoZoned): number {
+    return Math.trunc((other.ms - this.ms) / MIN) || 0;
+  }
   /** Elapsed whole hours to `other`, truncated toward zero. */
-  hoursUntil(other: ChronoZoned): number { return ((other.ms - this.ms) / HOUR) | 0; }
+  hoursUntil(other: ChronoZoned): number {
+    return Math.trunc((other.ms - this.ms) / HOUR) || 0;
+  }
   /**
    * Whole **calendar** days between the local readings, not 24-hour spans - so a day that
    * crosses a DST boundary still counts as one.
